@@ -183,7 +183,9 @@ class CameraConsole(cmd.Cmd):
     def _start_onvif(self):
         import threading
         onvif.start_rtsp_relay(onvif.STREAM_URL)
-        threading.Thread(target=onvif.ws_discovery_server, daemon=True).start()
+        threading.Thread(target=lambda: onvif.discovery_run(
+            onvif.UUID_URN, onvif.SCOPES, onvif.HOST_IP, onvif.ONVIF_PORT
+        ), daemon=True).start()
         onvif.start_onvif_server()
 
     def do_probe(self, _):
