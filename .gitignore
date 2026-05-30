@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+/tmp/
+*.log
+diag*.py
+mqtt_test.py
+pppp_probe.py
+.venv/

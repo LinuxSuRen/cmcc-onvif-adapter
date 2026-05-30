@@ -1,0 +1,10 @@
+services:
+  cmcc-camera:
+    build: .
+    ports:
+      - "8089:8089"
+      - "8555:8555"
+    environment:
+      - PHONE=${PHONE}
+      - PASSWORD=${PASSWORD}
+    restart: unless-stopped
