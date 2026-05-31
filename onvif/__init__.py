@@ -8,6 +8,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message
 log = logging.getLogger("onvif")
 
 from onvif.discovery import run as discovery_run
+from onvif.rtsp_relay import start_rtsp_relay as _relay_start, stop_relay, get_rtsp_url, get_mode
 
 HOST_IP = "192.168.1.138"
 ONVIF_PORT = 8089
@@ -16,7 +17,9 @@ MANUFACTURER = "CMCC"
 MODEL = "V31S"
 DEVICE_UUID = str(uuid.uuid4())
 SCOPES = ["onvif://www.onvif.org/type/video_encoder",
+          "onvif://www.onvif.org/type/audio_encoder",
           "onvif://www.onvif.org/type/ptz",
+          "onvif://www.onvif.org/type/audio_output",
           "onvif://www.onvif.org/Profile/Streaming"]
 UUID_URN = f"urn:uuid:{DEVICE_UUID}"
 PROFILE_TOKEN = "main"
@@ -24,8 +27,16 @@ VIDEO_SRC_TOKEN = "vs"
 VIDEO_ENC_TOKEN = "ve"
 PTZ_NODE_TOKEN = "ptz"
 PTZ_CONFIG_TOKEN = "ptzcfg"
+AUDIO_SRC_TOKEN = "as"
+AUDIO_ENC_TOKEN = "ae"
+AUDIO_OUTPUT_TOKEN = "spk"
+RTSP_PORT = 8554
 STREAM_URL = None
+SNAPSHOT_URL = None
+_snapshot_cache = b""
+_snapshot_lock = threading.Lock()
 PTZ_CONTROLLER = None
+_onvif_ready = threading.Event()
 
 
 def soap_response(body):
@@ -33,6 +44,8 @@ def soap_response(body):
             '<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope"'
             ' xmlns:tds="http://www.onvif.org/ver10/device/wsdl"'
             ' xmlns:trt="http://www.onvif.org/ver10/media/wsdl"'
+            ' xmlns:tr2="http://www.onvif.org/ver20/media/wsdl"'
+            ' xmlns:tdio="http://www.onvif.org/ver10/deviceIO/wsdl"'
             ' xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"'
             ' xmlns:tt="http://www.onvif.org/ver10/schema">'
             f'<SOAP-ENV:Body>{body}</SOAP-ENV:Body>'
@@ -56,6 +69,15 @@ class ONVIFHandler(BaseHTTPRequestHandler):
         self.wfile.write(resp)
 
     def do_GET(self):
+        if self.path == "/snapshot.jpg" and _snapshot_cache:
+            with _snapshot_lock:
+                data = _snapshot_cache
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", len(data))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/xml")
         self.end_headers()
@@ -74,6 +96,10 @@ class ONVIFHandler(BaseHTTPRequestHandler):
                 f'<tds:Version><tt:Major>2</tt:Major><tt:Minor>4</tt:Minor></tds:Version>'
                 f"</tds:Service>"
                 f'<tds:Service><tds:Namespace>http://www.onvif.org/ver20/ptz/wsdl</tds:Namespace>'
+                f'<tds:XAddr>http://{HOST_IP}:{ONVIF_PORT}/onvif/device_service</tds:XAddr>'
+                f'<tds:Version><tt:Major>2</tt:Major><tt:Minor>4</tt:Minor></tds:Version>'
+                f"</tds:Service>"
+                f'<tds:Service><tds:Namespace>http://www.onvif.org/ver10/deviceIO/wsdl</tds:Namespace>'
                 f'<tds:XAddr>http://{HOST_IP}:{ONVIF_PORT}/onvif/device_service</tds:XAddr>'
                 f'<tds:Version><tt:Major>2</tt:Major><tt:Minor>4</tt:Minor></tds:Version>'
                 f"</tds:Service></tds:GetServicesResponse>"
@@ -106,6 +132,15 @@ class ONVIFHandler(BaseHTTPRequestHandler):
                 f'<tt:Quality>10</tt:Quality></tt:VideoEncoderConfiguration>'
                 f'<tt:PTZConfiguration token="{PTZ_CONFIG_TOKEN}"><tt:Name>PTZ</tt:Name>'
                 f'<tt:NodeToken>{PTZ_NODE_TOKEN}</tt:NodeToken></tt:PTZConfiguration>'
+                f'<tt:AudioSourceConfiguration token="{AUDIO_SRC_TOKEN}"><tt:Name>Mic</tt:Name>'
+                f'<tt:SourceToken>{AUDIO_SRC_TOKEN}</tt:SourceToken>'
+                f"</tt:AudioSourceConfiguration>"
+                f'<tt:AudioEncoderConfiguration token="{AUDIO_ENC_TOKEN}"><tt:Name>G711</tt:Name>'
+                f'<tt:Encoding>PCMU</tt:Encoding>'
+                f'<tt:Bitrate>64</tt:Bitrate>'
+                f'<tt:SampleRate>8000</tt:SampleRate>'
+                f'<tt:SessionTimeout>PT5S</tt:SessionTimeout>'
+                f"</tt:AudioEncoderConfiguration>"
                 f"</trt:Profiles></trt:GetProfilesResponse>"
             ),
             "GetVideoSources": lambda: soap_response(
@@ -116,14 +151,14 @@ class ONVIFHandler(BaseHTTPRequestHandler):
             ),
             "GetStreamUri": lambda: soap_response(
                 f'<trt:GetStreamUriResponse><trt:MediaUri>'
-                f'<tt:Uri>rtsp://{HOST_IP}:8555/cmcc_v31s</tt:Uri>'
+                f'<tt:Uri>rtsp://{HOST_IP}:{RTSP_PORT}/camera</tt:Uri>'
                 f'<tt:InvalidAfterConnect>false</tt:InvalidAfterConnect>'
                 f'<tt:InvalidAfterReboot>false</tt:InvalidAfterReboot>'
                 f'<tt:Timeout>PT0S</tt:Timeout></trt:MediaUri></trt:GetStreamUriResponse>'
             ),
             "GetSnapshotUri": lambda: soap_response(
                 f'<trt:GetSnapshotUriResponse><trt:MediaUri>'
-                f'<tt:Uri>http://{HOST_IP}:8089/snapshot.jpg</tt:Uri>'
+                f'<tt:Uri>http://{HOST_IP}:{ONVIF_PORT}/snapshot.jpg</tt:Uri>'
                 f'</trt:MediaUri></trt:GetSnapshotUriResponse>'
             ),
             "GetNodes": lambda: soap_response(
@@ -161,6 +196,59 @@ class ONVIFHandler(BaseHTTPRequestHandler):
             ),
             "ContinuousMove": lambda: self._continuous_move(body),
             "Stop": lambda: self._ptz_stop(),
+            "GetAudioSources": lambda: soap_response(
+                f'<trt:GetAudioSourcesResponse>'
+                f'<trt:AudioSources token="{AUDIO_SRC_TOKEN}">'
+                f'<tt:Channels>1</tt:Channels>'
+                f"</trt:AudioSources></trt:GetAudioSourcesResponse>"
+            ),
+            "GetAudioEncoderConfigurations": lambda: soap_response(
+                f'<trt:GetAudioEncoderConfigurationsResponse>'
+                f'<trt:Configurations token="{AUDIO_ENC_TOKEN}"><tt:Name>G711</tt:Name>'
+                f'<tt:Encoding>PCMU</tt:Encoding>'
+                f'<tt:Bitrate>64</tt:Bitrate>'
+                f'<tt:SampleRate>8000</tt:SampleRate>'
+                f"</trt:Configurations></trt:GetAudioEncoderConfigurationsResponse>"
+            ),
+            "GetAudioSourceConfiguration": lambda: soap_response(
+                f'<trt:GetAudioSourceConfigurationResponse>'
+                f'<trt:Configurations token="{AUDIO_SRC_TOKEN}"><tt:Name>Mic</tt:Name>'
+                f'<tt:SourceToken>{AUDIO_SRC_TOKEN}</tt:SourceToken>'
+                f"</trt:Configurations></trt:GetAudioSourceConfigurationResponse>"
+            ),
+            "GetAudioEncoderConfiguration": lambda: soap_response(
+                f'<trt:GetAudioEncoderConfigurationResponse>'
+                f'<trt:Configurations token="{AUDIO_ENC_TOKEN}"><tt:Name>G711</tt:Name>'
+                f'<tt:Encoding>PCMU</tt:Encoding>'
+                f'<tt:Bitrate>64</tt:Bitrate>'
+                f'<tt:SampleRate>8000</tt:SampleRate>'
+                f"</trt:Configurations></trt:GetAudioEncoderConfigurationResponse>"
+            ),
+            "GetAudioOutputs": lambda: soap_response(
+                f'<tdio:GetAudioOutputsResponse>'
+                f'<tdio:AudioOutputs token="{AUDIO_OUTPUT_TOKEN}">'
+                f"</tdio:AudioOutputs></tdio:GetAudioOutputsResponse>"
+            ),
+            "GetAudioOutputConfiguration": lambda: soap_response(
+                f'<tdio:GetAudioOutputConfigurationResponse>'
+                f'<tdio:Configurations token="{AUDIO_OUTPUT_TOKEN}"><tt:Name>Speaker</tt:Name>'
+                f'<tt:OutputLevel>50</tt:OutputLevel>'
+                f"</tdio:Configurations></tdio:GetAudioOutputConfigurationResponse>"
+            ),
+            "GetCompatibleAudioEncoderConfigurations": lambda: soap_response(
+                f'<trt:GetCompatibleAudioEncoderConfigurationsResponse>'
+                f'<trt:Configurations token="{AUDIO_ENC_TOKEN}"><tt:Name>G711</tt:Name>'
+                f'<tt:Encoding>PCMU</tt:Encoding>'
+                f'<tt:Bitrate>64</tt:Bitrate>'
+                f'<tt:SampleRate>8000</tt:SampleRate>'
+                f"</trt:Configurations></trt:GetCompatibleAudioEncoderConfigurationsResponse>"
+            ),
+            "GetCompatibleAudioSourceConfigurations": lambda: soap_response(
+                f'<trt:GetCompatibleAudioSourceConfigurationsResponse>'
+                f'<trt:Configurations token="{AUDIO_SRC_TOKEN}"><tt:Name>Mic</tt:Name>'
+                f'<tt:SourceToken>{AUDIO_SRC_TOKEN}</tt:SourceToken>'
+                f"</trt:Configurations></trt:GetCompatibleAudioSourceConfigurationsResponse>"
+            ),
         }
         handler = h.get(op, lambda: soap_response(f"<Response/>"))
         return handler()
@@ -191,15 +279,50 @@ class ONVIFHandler(BaseHTTPRequestHandler):
 
 
 def start_onvif_server(host="0.0.0.0", port=ONVIF_PORT):
-    server = HTTPServer((host, port), ONVIFHandler)
-    log.info(f"ONVIF http://{HOST_IP}:{port}/onvif/device_service")
-    server.serve_forever()
+    """Start ONVIF SOAP server, trying ports {port}, {port-1}, ... until one works."""
+    actual_port = port
+    while actual_port >= port - 10:
+        try:
+            server = HTTPServer((host, actual_port), ONVIFHandler)
+            global ONVIF_PORT
+            ONVIF_PORT = actual_port
+            _onvif_ready.set()
+            log.info(f"ONVIF http://{HOST_IP}:{actual_port}/onvif/device_service")
+            server.serve_forever()
+            return
+        except OSError:
+            log.warning(f"Port {actual_port} in use, trying {actual_port - 1}")
+            actual_port -= 1
+    raise OSError(f"No available port in range {port-10}-{port}")
 
 
 def start_rtsp_relay(flv_url, mjpeg_port=8555):
-    proc = subprocess.Popen(
-        ["ffmpeg", "-re", "-i", flv_url, "-c:v", "mjpeg", "-q:v", "5", "-f", "mpjpeg",
-         f"http://0.0.0.0:{mjpeg_port}/stream"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    log.info(f"MJPEG http://{HOST_IP}:{mjpeg_port}/stream")
-    return proc
+    _relay_start(flv_url, mjpeg_port)
+    mode = get_mode()
+    if mode == "rtsp":
+        log.info(f"RTSP relay at rtsp://{HOST_IP}:{RTSP_PORT}/camera")
+    else:
+        log.info(f"MJPEG relay (fallback) at http://{HOST_IP}:{mjpeg_port}/stream — audio/backchannel unavailable")
+    if SNAPSHOT_URL:
+        threading.Thread(target=_snapshot_refresh_loop, daemon=True).start()
+
+
+def _snapshot_refresh_loop():
+    """Background thread: refresh cached snapshot every 5 seconds."""
+    global _snapshot_cache
+    log.info("Snapshot cache refresh started")
+    while True:
+        if not SNAPSHOT_URL:
+            time.sleep(5)
+            continue
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-y", "-i", SNAPSHOT_URL, "-vframes", "1",
+                 "-f", "image2", "pipe:1"],
+                capture_output=True, timeout=15)
+            if result.returncode == 0 and result.stdout:
+                with _snapshot_lock:
+                    _snapshot_cache = result.stdout
+        except Exception:
+            pass
+        time.sleep(5)
