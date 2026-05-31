@@ -1,0 +1,52 @@
+# MediaMTX configuration for CMCC ONVIF Adapter
+# RTSP server with ONVIF backchannel support
+
+readTimeout: 10s
+writeTimeout: 10s
+readBufferCount: 512
+runOnDemandStartTimeout: 10s
+runOnDemandCloseAfter: 10s
+
+# Network
+rtspAddress: :8554
+rtmpAddress: :1935
+hlsAddress: :8888
+webrtcAddress: :8889
+
+# Path configuration
+paths:
+  camera:
+    source: publisher
+    sourceProtocol: tcp
+    runOnInit: ffmpeg -re -i rtsp://localhost:8554/camera -c copy -f null -
+    runOnInitRestart: yes
+
+  # Backchannel-only path for intercom audio
+  camera_backchannel:
+    source: publisher
+    sourceProtocol: tcp
+    runOnInit: ffmpeg -re -i rtsp://localhost:8554/camera_backchannel -c copy -f null -
+    runOnInitRestart: yes
+
+# Logging
+logLevel: info
+logDestinations: [stdout]
+
+# Authentication (permissive for local adapter)
+authMethod: internal
+authInternalUsers:
+  - user: any
+    pass: any
+    permissions:
+      - action: api
+      - action: metrics
+      - action: playback
+    ips: [127.0.0.0/8, 172.16.0.0/12, 10.0.0.0/8, 192.168.0.0/16]
+
+# API (enable for health checks)
+api: yes
+apiAddress: :9997
+
+# Metrics
+metrics: yes
+metricsAddress: :9998

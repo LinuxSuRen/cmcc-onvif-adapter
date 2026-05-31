@@ -11,6 +11,6 @@ COPY . .
 
 ENV HOST_IP=0.0.0.0
 
-EXPOSE 8089 8555
+EXPOSE 8089 8554 8555
 
 CMD ["python3", "main.py"]

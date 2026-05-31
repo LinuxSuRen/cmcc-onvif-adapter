@@ -1,10 +1,20 @@
 services:
+  # MediaMTX RTSP server with audio backchannel
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: mediamtx
+    network_mode: host
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml
+    restart: unless-stopped
+
+  # CMCC ONVIF adapter
   cmcc-camera:
     build: .
-    ports:
-      - "8089:8089"
-      - "8555:8555"
+    network_mode: host
     environment:
       - PHONE=${PHONE}
       - PASSWORD=${PASSWORD}
+    depends_on:
+      - mediamtx
     restart: unless-stopped
