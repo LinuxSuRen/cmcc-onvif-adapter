@@ -6,3 +6,4 @@ diag*.py
 mqtt_test.py
 pppp_probe.py
 .venv/
+.sisyphus/
