@@ -235,7 +235,7 @@ class CameraConsole(cmd.Cmd):
             print("请先选择摄像头")
             return
         onvif.STREAM_URL = get_live_url(self.auth, self.cam)
-        onvif.SNAPSHOT_URL = onvif.STREAM_URL
+        onvif.SNAPSHOT_URL = lambda: get_live_url(self.auth, self.cam)
         onvif.PTZ_CONTROLLER = self.ptz
         if not onvif.STREAM_URL:
             print("❌ 无法获取直播流")

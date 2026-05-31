@@ -32,10 +32,19 @@ AUDIO_ENC_TOKEN = "ae"
 AUDIO_OUTPUT_TOKEN = "spk"
 RTSP_PORT = 8554
 STREAM_URL = None
-SNAPSHOT_URL = None
+SNAPSHOT_URL = None  # static URL string, or callable returning a fresh URL
 _snapshot_cache = b""
 _snapshot_lock = threading.Lock()
 PTZ_CONTROLLER = None
+
+
+def _get_snapshot_url():
+    """Resolve SNAPSHOT_URL: callable or static string."""
+    if SNAPSHOT_URL is None:
+        return None
+    if callable(SNAPSHOT_URL):
+        return SNAPSHOT_URL()
+    return SNAPSHOT_URL
 _onvif_ready = threading.Event()
 
 
@@ -311,18 +320,28 @@ def _snapshot_refresh_loop():
     """Background thread: refresh cached snapshot every 5 seconds."""
     global _snapshot_cache
     log.info("Snapshot cache refresh started")
+    fail_count = 0
     while True:
-        if not SNAPSHOT_URL:
+        url = _get_snapshot_url()
+        if not url:
             time.sleep(5)
             continue
         try:
             result = subprocess.run(
-                ["ffmpeg", "-y", "-i", SNAPSHOT_URL, "-vframes", "1",
+                ["ffmpeg", "-y", "-i", url, "-vframes", "1",
                  "-f", "image2", "pipe:1"],
                 capture_output=True, timeout=15)
             if result.returncode == 0 and result.stdout:
                 with _snapshot_lock:
                     _snapshot_cache = result.stdout
-        except Exception:
-            pass
+                if fail_count > 0:
+                    log.info(f"Snapshot refresh recovered after {fail_count} failures")
+                fail_count = 0
+            else:
+                fail_count += 1
+                stderr = result.stderr.decode(errors="ignore")[-200:] if result.stderr else "no output"
+                log.warning(f"Snapshot ffmpeg failed (rc={result.returncode}, #{fail_count}): {stderr}")
+        except Exception as e:
+            fail_count += 1
+            log.warning(f"Snapshot refresh error #{fail_count}: {e}")
         time.sleep(5)
