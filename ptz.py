@@ -45,7 +45,11 @@ class PTZController:
         }
         params["sign"] = _sign(params)
         r = requests.get(self.url, params=params, headers=self._headers())
-        ok = r.json().get("code") == "0"
+        resp = r.json()
+        ok = resp.get("code") == "0"
+        if not ok:
+            print(f"[PTZ] move {direction} FAILED: {resp}")
+            return False
         if ok:
             _time.sleep(duration_ms / 1000)
             self.stop()

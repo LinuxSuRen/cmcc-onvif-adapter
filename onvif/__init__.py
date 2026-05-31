@@ -69,7 +69,7 @@ class ONVIFHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(length).decode("utf-8", errors="ignore")
         action = self.headers.get("SOAPAction", "").strip('"')
         op = action.split("/")[-1] if action else ""
-        log.debug(op)
+        print(f"[ONVIF] {op}")
         resp = self._handle(op, body)
         self.send_response(200)
         self.send_header("Content-Type", "application/soap+xml; charset=utf-8")
@@ -264,21 +264,35 @@ class ONVIFHandler(BaseHTTPRequestHandler):
 
     def _continuous_move(self, body):
         if PTZ_CONTROLLER is None:
+            print("[ONVIF PTZ] PTZ_CONTROLLER=None, returning fake OK")
             return soap_response("<tptz:ContinuousMoveResponse/>")
         try:
             root = ET.fromstring(body)
-            ns = {"tt": "http://www.onvif.org/ver10/schema"}
-            vel = root.find(".//tt:Velocity", ns)
+            ns = {
+                "tt": "http://www.onvif.org/ver10/schema",
+                "tptz": "http://www.onvif.org/ver20/ptz/wsdl",
+            }
+            vel = root.find(".//tptz:Velocity", ns)
             if vel is not None:
                 pt_elem = vel.find("tt:PanTilt", ns)
                 pan = float(pt_elem.get("x", "0")) if pt_elem is not None else 0
                 tilt = float(pt_elem.get("y", "0")) if pt_elem is not None else 0
+                print(f"[ONVIF PTZ] pan={pan}, tilt={tilt}")
+                def do_move(direction):
+                    print(f"[ONVIF PTZ] calling move({direction})...")
+                    ok = PTZ_CONTROLLER.move(direction, 800)
+                    print(f"[ONVIF PTZ] move {direction}: {'OK' if ok else 'FAILED'}")
                 if abs(pan) > 0.1:
-                    threading.Thread(target=lambda: PTZ_CONTROLLER.move("left" if pan < 0 else "right", 800), daemon=True).start()
+                    threading.Thread(target=lambda: do_move("left" if pan < 0 else "right"), daemon=True).start()
                 elif abs(tilt) > 0.1:
-                    threading.Thread(target=lambda: PTZ_CONTROLLER.move("up" if tilt > 0 else "down", 800), daemon=True).start()
+                    threading.Thread(target=lambda: do_move("up" if tilt > 0 else "down"), daemon=True).start()
+                else:
+                    print(f"[ONVIF PTZ] velocity too low: pan={pan}, tilt={tilt}")
+            else:
+                print("[ONVIF PTZ] no Velocity element found")
         except Exception as e:
-            log.error(f"PTZ err: {e}")
+            print(f"[ONVIF PTZ] error: {e}")
+            import traceback; traceback.print_exc()
         return soap_response("<tptz:ContinuousMoveResponse/>")
 
     def _ptz_stop(self):
